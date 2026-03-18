@@ -181,7 +181,8 @@ namespace Racer.Scripting
                                          List<AstNodes.ExprNode> args,
                                          CompilerContext ctx, int sourceLine) => false;
 
-        public bool TryCompileObjectDecl(string typeName, List<AstNodes.ExprNode> args,
+        public bool TryCompileObjectDecl(string typeName, string varName,
+                                         List<AstNodes.ExprNode> args,
                                          CompilerContext ctx, int sourceLine) => false;
 
         // ─── helpers ───
