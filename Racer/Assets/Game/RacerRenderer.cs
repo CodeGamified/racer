@@ -61,6 +61,8 @@ namespace Racer.Game
         private void BuildTrack()
         {
             float halfWidth = _track.TrackWidth * 0.5f;
+            float edgeExtra = 0.05f;
+            int count = _track.WaypointCount;
 
             // Ground plane
             var ground = GameObject.CreatePrimitive(PrimitiveType.Cube);
@@ -75,38 +77,30 @@ namespace Racer.Game
             ground.name = "Ground";
             _trackSegments.Add(ground);
 
-            // Road segments
-            for (int i = 0; i < _track.WaypointCount; i++)
+            // Compute per-waypoint perpendicular (averaged from incoming/outgoing)
+            var leftRoad  = new Vector3[count];
+            var rightRoad = new Vector3[count];
+            var leftEdge  = new Vector3[count];
+            var rightEdge = new Vector3[count];
+
+            for (int i = 0; i < count; i++)
             {
-                int next = (i + 1) % _track.WaypointCount;
-                var a = _track.Waypoints[i];
-                var b = _track.Waypoints[next];
+                int prev = (i - 1 + count) % count;
+                int next = (i + 1) % count;
+                var tangent = (_track.Waypoints[next] - _track.Waypoints[prev]).normalized;
+                var perp = new Vector3(-tangent.z, 0f, tangent.x); // left-hand perp on XZ
 
-                var mid = (a + b) * 0.5f;
-                var dir = b - a;
-                float len = dir.magnitude;
-                float angle = Mathf.Atan2(dir.x, dir.z) * Mathf.Rad2Deg;
-
-                // Road surface
-                var seg = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                seg.transform.parent = transform;
-                seg.transform.localPosition = new Vector3(mid.x, -0.04f, mid.z);
-                seg.transform.localScale = new Vector3(_track.TrackWidth, 0.02f, len);
-                seg.transform.localRotation = Quaternion.Euler(0, angle, 0);
-                seg.GetComponent<Renderer>().material = CreateMat(RoadColor);
-                seg.name = $"Road_{i}";
-                _trackSegments.Add(seg);
-
-                // Road edge lines
-                var edge = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                edge.transform.parent = transform;
-                edge.transform.localPosition = new Vector3(mid.x, -0.035f, mid.z);
-                edge.transform.localScale = new Vector3(_track.TrackWidth + 0.1f, 0.015f, len + 0.05f);
-                edge.transform.localRotation = Quaternion.Euler(0, angle, 0);
-                edge.GetComponent<Renderer>().material = CreateMat(RoadEdgeColor);
-                edge.name = $"Edge_{i}";
-                _trackSegments.Add(edge);
+                var wp = _track.Waypoints[i];
+                leftRoad[i]  = wp - perp * halfWidth;
+                rightRoad[i] = wp + perp * halfWidth;
+                leftEdge[i]  = wp - perp * (halfWidth + edgeExtra);
+                rightEdge[i] = wp + perp * (halfWidth + edgeExtra);
             }
+
+            // Build road edge ribbon mesh (slightly wider, sits below road)
+            BuildRibbonMesh("TrackEdge", leftEdge, rightEdge, -0.035f, RoadEdgeColor);
+            // Build road surface ribbon mesh
+            BuildRibbonMesh("TrackRoad", leftRoad, rightRoad, -0.02f, RoadColor);
 
             // Start/finish line
             var wp0 = _track.GetWaypoint(0);
@@ -114,13 +108,55 @@ namespace Racer.Game
             var startDir = (wp1 - wp0).normalized;
             var finishLine = GameObject.CreatePrimitive(PrimitiveType.Cube);
             finishLine.transform.parent = transform;
-            finishLine.transform.localPosition = new Vector3(wp0.x, -0.02f, wp0.z);
+            finishLine.transform.localPosition = new Vector3(wp0.x, -0.01f, wp0.z);
             finishLine.transform.localScale = new Vector3(_track.TrackWidth * 1.2f, 0.01f, 0.08f);
             float finAngle = Mathf.Atan2(startDir.x, startDir.z) * Mathf.Rad2Deg;
             finishLine.transform.localRotation = Quaternion.Euler(0, finAngle, 0);
             finishLine.GetComponent<Renderer>().material = CreateMat(FinishColor);
             finishLine.name = "FinishLine";
             _trackSegments.Add(finishLine);
+        }
+
+        /// <summary>
+        /// Creates a closed-loop ribbon mesh from left/right edge arrays.
+        /// </summary>
+        private void BuildRibbonMesh(string name, Vector3[] left, Vector3[] right, float y, Color color)
+        {
+            int count = left.Length;
+            var verts = new Vector3[count * 2];
+            var tris = new int[count * 6]; // 2 triangles per quad, 3 indices each
+
+            for (int i = 0; i < count; i++)
+            {
+                verts[i * 2]     = new Vector3(left[i].x,  y, left[i].z);
+                verts[i * 2 + 1] = new Vector3(right[i].x, y, right[i].z);
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                int next = (i + 1) % count;
+                int vi = i * 2;
+                int vn = next * 2;
+                int ti = i * 6;
+
+                // Clockwise winding viewed from +Y (camera looks down)
+                tris[ti]     = vi;
+                tris[ti + 1] = vi + 1;
+                tris[ti + 2] = vn;
+
+                tris[ti + 3] = vi + 1;
+                tris[ti + 4] = vn + 1;
+                tris[ti + 5] = vn;
+            }
+
+            var mesh = new Mesh { vertices = verts, triangles = tris };
+            mesh.RecalculateNormals();
+
+            var go = new GameObject(name);
+            go.transform.parent = transform;
+            go.AddComponent<MeshFilter>().mesh = mesh;
+            go.AddComponent<MeshRenderer>().material = CreateMat(color);
+            _trackSegments.Add(go);
         }
 
         // ═══════════════════════════════════════════════════════════════
