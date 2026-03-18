@@ -1,3 +1,3 @@
-[submodule "Blackjack/Assets/Engine"]
-	path = Blackjack/Assets/Engine
+[submodule "Racer/Assets/Engine"]
+	path = Racer/Assets/Engine
 	url = https://github.com/CodeGamified/.engine.git
