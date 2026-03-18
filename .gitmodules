@@ -1,0 +1,3 @@
+[submodule "Blackjack/Assets/Engine"]
+	path = Blackjack/Assets/Engine
+	url = https://github.com/CodeGamified/.engine.git
