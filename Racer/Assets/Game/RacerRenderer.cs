@@ -9,6 +9,7 @@ namespace Racer.Game
     /// <summary>
     /// Visual renderer — top-down racing view.
     /// Track as a ribbon of flat quads, car as a colored cube, waypoint markers.
+    /// Glow system: car point light + waypoint point light (pulsing) + HDR emission.
     /// </summary>
     public class RacerRenderer : MonoBehaviour, IQualityResponsive
     {
@@ -21,15 +22,29 @@ namespace Racer.Game
         private readonly List<GameObject> _trackSegments = new();
         private readonly List<GameObject> _dynamicObjects = new();
         private GameObject _carObject;
+        private Renderer _carRenderer;
         private GameObject _nextWpMarker;
+        private Renderer _nextWpRenderer;
+
+        // ── Glow system ──
+        private Light _carLight;
+        private const float CarLightBaseIntensity = 0.5f;
+        private const float CarLightDecay = 3f;
+
+        private Light _wpLight;
+        private const float WpLightBaseIntensity = 0.4f;
+        private const float WpLightRange = 1.5f;
+        private float _wpPulsePhase;
+
+        private readonly List<(Renderer renderer, Color baseColor)> _flashedRenderers = new();
 
         // ── Colors ──
         private static readonly Color RoadColor      = new(0.2f, 0.2f, 0.22f);
         private static readonly Color RoadEdgeColor  = new(0.7f, 0.7f, 0.3f);
         private static readonly Color OffRoadColor   = new(0.08f, 0.15f, 0.05f);
-        private static readonly Color CarColor       = new(0.1f, 0.5f, 0.95f);
-        private static readonly Color CarOffRoadColor = new(0.9f, 0.3f, 0.1f);
-        private static readonly Color WaypointColor  = new(0.2f, 0.9f, 0.3f, 0.5f);
+        public  static readonly Color CarColor       = new(0.1f, 0.5f, 0.95f);
+        public  static readonly Color CarOffRoadColor = new(0.9f, 0.3f, 0.1f);
+        public  static readonly Color WaypointColor  = new(0.2f, 0.9f, 0.3f, 0.5f);
         private static readonly Color FinishColor    = new(1f, 1f, 1f);
 
         public void Initialize(RacerTrack track, RacerCar car, RacerMatchManager match)
@@ -48,6 +63,10 @@ namespace Racer.Game
 
         private void LateUpdate()
         {
+            DecayCarLight();
+            DecayWpLight();
+            DecayFlashedRenderers();
+
             UpdateCar();
             UpdateWaypointMarker();
         }
@@ -168,7 +187,8 @@ namespace Racer.Game
             _carObject = GameObject.CreatePrimitive(PrimitiveType.Cube);
             _carObject.transform.parent = transform;
             _carObject.transform.localScale = new Vector3(0.2f, 0.08f, 0.35f);
-            _carObject.GetComponent<Renderer>().material = CreateMat(CarColor);
+            _carRenderer = _carObject.GetComponent<Renderer>();
+            _carRenderer.material = CreateMat(CarColor);
             _carObject.name = "Car";
         }
 
@@ -177,7 +197,8 @@ namespace Racer.Game
             _nextWpMarker = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
             _nextWpMarker.transform.parent = transform;
             _nextWpMarker.transform.localScale = new Vector3(0.3f, 0.02f, 0.3f);
-            _nextWpMarker.GetComponent<Renderer>().material = CreateMat(WaypointColor);
+            _nextWpRenderer = _nextWpMarker.GetComponent<Renderer>();
+            _nextWpRenderer.material = CreateMat(WaypointColor);
             _nextWpMarker.name = "NextWaypoint";
         }
 
@@ -192,9 +213,11 @@ namespace Racer.Game
             _carObject.transform.localPosition = new Vector3(_car.PosX, 0.04f, _car.PosZ);
             _carObject.transform.localRotation = Quaternion.Euler(0, _car.Heading, 0);
 
-            // Tint red when off-road
+            // Tint red when off-road, blue when on-road — with HDR emission
             Color c = _car.IsOnRoad ? CarColor : CarOffRoadColor;
-            _carObject.GetComponent<Renderer>().material.color = c;
+            float speedBoost = 1f + Mathf.Clamp01(Mathf.Abs(_car.Speed) / RacerCar.MaxSpeed) * 1.5f;
+            Color hdr = new Color(c.r * speedBoost, c.g * speedBoost, c.b * speedBoost);
+            SetHDRColorMat(_carRenderer.material, hdr);
         }
 
         private void UpdateWaypointMarker()
@@ -203,6 +226,161 @@ namespace Racer.Game
 
             var wp = _track.GetWaypoint(_match.NextWaypoint);
             _nextWpMarker.transform.localPosition = new Vector3(wp.x, 0.01f, wp.z);
+
+            // Waypoint always glows with HDR emission
+            Color wpHDR = new Color(WaypointColor.r * 2f, WaypointColor.g * 2f, WaypointColor.b * 2f);
+            SetHDRColorMat(_nextWpRenderer.material, wpHDR);
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // GLOW / FLASH API — called by RacerBootstrap event wiring
+        // ═══════════════════════════════════════════════════════════════
+
+        /// <summary>Create a point light on the car.</summary>
+        public void CreateCarLight()
+        {
+            if (_carLight != null) return;
+            var go = new GameObject("CarGlow");
+            go.transform.SetParent(transform, false);
+            _carLight = go.AddComponent<Light>();
+            _carLight.type = LightType.Point;
+            _carLight.range = 2f;
+            _carLight.intensity = CarLightBaseIntensity;
+            _carLight.color = CarColor;
+            _carLight.shadows = LightShadows.None;
+        }
+
+        /// <summary>Create a pulsing point light on the next waypoint.</summary>
+        public void CreateWaypointLight()
+        {
+            if (_wpLight != null) return;
+            var go = new GameObject("WpGlow");
+            go.transform.SetParent(transform, false);
+            _wpLight = go.AddComponent<Light>();
+            _wpLight.type = LightType.Point;
+            _wpLight.range = WpLightRange;
+            _wpLight.intensity = WpLightBaseIntensity;
+            _wpLight.color = new Color(WaypointColor.r, WaypointColor.g, WaypointColor.b);
+            _wpLight.shadows = LightShadows.None;
+        }
+
+        /// <summary>Flash the car light to a high intensity + color.</summary>
+        public void FlashCarLight(float intensity, Color color)
+        {
+            if (_carLight == null) return;
+            _carLight.intensity = intensity;
+            _carLight.color = color;
+            _carLight.range = 2f + intensity * 0.3f;
+        }
+
+        /// <summary>Flash the waypoint light.</summary>
+        public void FlashWpLight(float intensity, Color color)
+        {
+            if (_wpLight == null) return;
+            _wpLight.intensity = intensity;
+            _wpLight.color = color;
+            _wpLight.range = WpLightRange + intensity * 0.3f;
+        }
+
+        /// <summary>Flash the car cube with HDR color.</summary>
+        public void FlashCarColor(Color hdrColor)
+        {
+            if (_carRenderer == null) return;
+            FlashRenderer(_carObject, hdrColor, CarColor);
+        }
+
+        /// <summary>Flash the waypoint marker with HDR color.</summary>
+        public void FlashWaypointColor(Color hdrColor)
+        {
+            if (_nextWpRenderer == null) return;
+            Color baseCol = new Color(WaypointColor.r, WaypointColor.g, WaypointColor.b);
+            FlashRenderer(_nextWpMarker, hdrColor, baseCol);
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // DECAY — runs every LateUpdate
+        // ═══════════════════════════════════════════════════════════════
+
+        private void DecayCarLight()
+        {
+            if (_carLight == null) return;
+            float decay = Mathf.Clamp01(CarLightDecay * Time.unscaledDeltaTime);
+            _carLight.intensity = Mathf.Lerp(_carLight.intensity, CarLightBaseIntensity, decay);
+            _carLight.color = Color.Lerp(_carLight.color, CarColor, decay);
+            _carLight.range = Mathf.Lerp(_carLight.range, 2f, decay);
+
+            if (_car != null)
+                _carLight.transform.localPosition = new Vector3(_car.PosX, 0.15f, _car.PosZ);
+        }
+
+        private void DecayWpLight()
+        {
+            if (_wpLight == null || _track == null || _match == null) return;
+
+            // Gentle pulse
+            _wpPulsePhase += Time.unscaledDeltaTime * 3f;
+            float pulse = WpLightBaseIntensity + Mathf.Sin(_wpPulsePhase) * 0.15f;
+
+            float decay = Mathf.Clamp01(CarLightDecay * Time.unscaledDeltaTime);
+            _wpLight.intensity = Mathf.Lerp(_wpLight.intensity, pulse, decay);
+            Color baseWp = new Color(WaypointColor.r, WaypointColor.g, WaypointColor.b);
+            _wpLight.color = Color.Lerp(_wpLight.color, baseWp, decay);
+            _wpLight.range = Mathf.Lerp(_wpLight.range, WpLightRange, decay);
+
+            var wp = _track.GetWaypoint(_match.NextWaypoint);
+            _wpLight.transform.localPosition = new Vector3(wp.x, 0.2f, wp.z);
+        }
+
+        private void DecayFlashedRenderers()
+        {
+            float decay = Mathf.Clamp01(CarLightDecay * Time.unscaledDeltaTime);
+            for (int i = _flashedRenderers.Count - 1; i >= 0; i--)
+            {
+                var (fr, baseCol) = _flashedRenderers[i];
+                if (fr == null) { _flashedRenderers.RemoveAt(i); continue; }
+                var mat = fr.material;
+                Color current = mat.HasProperty("_BaseColor") ? mat.GetColor("_BaseColor") : mat.color;
+                Color next = Color.Lerp(current, baseCol, decay);
+                SetHDRColorMat(mat, next);
+                if (Mathf.Abs(next.r - baseCol.r) + Mathf.Abs(next.g - baseCol.g) + Mathf.Abs(next.b - baseCol.b) < 0.03f)
+                {
+                    SetHDRColorMat(mat, baseCol);
+                    _flashedRenderers.RemoveAt(i);
+                }
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // HDR HELPERS
+        // ═══════════════════════════════════════════════════════════════
+
+        private void FlashRenderer(GameObject go, Color hdrColor, Color baseColor)
+        {
+            var r = go.GetComponent<Renderer>();
+            if (r == null) return;
+            int idx = _flashedRenderers.FindIndex(e => e.renderer == r);
+            Color origColor = baseColor;
+            if (idx >= 0)
+            {
+                origColor = _flashedRenderers[idx].baseColor;
+                _flashedRenderers.RemoveAt(idx);
+            }
+            _flashedRenderers.Add((r, origColor));
+            SetHDRColorMat(r.material, hdrColor);
+        }
+
+        private static void SetHDRColorMat(Material mat, Color color)
+        {
+            if (mat.HasProperty("_BaseColor"))
+                mat.SetColor("_BaseColor", color);
+            else
+                mat.color = color;
+
+            if (mat.HasProperty("_EmissionColor"))
+            {
+                mat.EnableKeyword("_EMISSION");
+                mat.SetColor("_EmissionColor", color);
+            }
         }
 
         // ═══════════════════════════════════════════════════════════════

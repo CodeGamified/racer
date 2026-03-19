@@ -11,6 +11,7 @@ using CodeGamified.Quality;
 using CodeGamified.Bootstrap;
 using Racer.Game;
 using Racer.Scripting;
+using Racer.UI;
 
 namespace Racer.Core
 {
@@ -73,6 +74,12 @@ namespace Racer.Core
         private RacerRenderer _renderer;
         private RacerProgram _playerProgram;
 
+        // Trail
+        private RacerCarTrail _carTrail;
+
+        // TUI
+        private RacerTUIManager _tuiManager;
+
         // Camera
         private CameraAmbientMotion _cameraSway;
 
@@ -119,10 +126,12 @@ namespace Racer.Core
             CreateMatchManager();
             SetupCamera();
             CreateRenderer();
+            CreateCarTrail();
             CreateInputProvider();
 
             if (enableScripting) CreatePlayerProgram();
 
+            CreateTUI();
             WireEvents();
             StartCoroutine(RunBootSequence());
         }
@@ -249,7 +258,9 @@ namespace Racer.Core
             var go = new GameObject("RacerRenderer");
             _renderer = go.AddComponent<RacerRenderer>();
             _renderer.Initialize(_track, _car, _match);
-            Log("Created Renderer (road + car + waypoint markers)");
+            _renderer.CreateCarLight();
+            _renderer.CreateWaypointLight();
+            Log("Created Renderer (road + car + waypoint markers + car/wp glow)");
         }
 
         // =================================================================
@@ -276,6 +287,30 @@ namespace Racer.Core
         }
 
         // =================================================================
+        // CAR TRAIL
+        // =================================================================
+
+        private void CreateCarTrail()
+        {
+            var go = new GameObject("CarTrail");
+            _carTrail = go.AddComponent<RacerCarTrail>();
+            _carTrail.Initialize(_car, RacerRenderer.CarColor);
+            Log("Created CarTrail");
+        }
+
+        // =================================================================
+        // TUI (.engine powered)
+        // =================================================================
+
+        private void CreateTUI()
+        {
+            var go = new GameObject("RacerTUI");
+            _tuiManager = go.AddComponent<RacerTUIManager>();
+            _tuiManager.Initialize(_match, _playerProgram);
+            Log("Created TUI (left debugger + right status panel)");
+        }
+
+        // =================================================================
         // EVENT WIRING
         // =================================================================
 
@@ -293,11 +328,19 @@ namespace Racer.Core
                 {
                     Log($"RACE STARTED — {totalLaps} laps, GO!");
                     _renderer?.MarkDirty();
+                    _carTrail?.ClearLine();
                 };
 
                 _match.OnWaypointHit += () =>
                 {
                     _renderer?.MarkDirty();
+
+                    // Flash waypoint + car on waypoint hit
+                    var wc = RacerRenderer.WaypointColor;
+                    Color wpFlash = new Color(wc.r * 4f, wc.g * 4f, wc.b * 4f);
+                    _renderer?.FlashWpLight(2f, Color.white);
+                    _renderer?.FlashWaypointColor(wpFlash);
+                    _renderer?.FlashCarLight(1.5f, new Color(0.2f, 0.9f, 0.3f));
                 };
 
                 _match.OnLapCompleted += () =>
@@ -307,6 +350,10 @@ namespace Racer.Core
                         ? FormatTime(_match.BestLapTime) : "--:--.--";
                     Log($"LAP {_match.CurrentLap - 1} complete — {lapTime} │ Best: {bestLap}");
                     _renderer?.MarkDirty();
+
+                    // Big flash on lap completion
+                    _renderer?.FlashCarLight(3f, new Color(1f, 1f, 0f));
+                    _renderer?.FlashCarColor(new Color(2f, 2f, 0.5f));
                 };
 
                 _match.OnRaceFinished += () =>
@@ -315,11 +362,20 @@ namespace Racer.Core
                     string best = _match.BestRaceTime < float.MaxValue
                         ? FormatTime(_match.BestRaceTime) : "--:--.--";
                     Log($"🏁 RACE FINISHED — Time: {total} │ Best: {best} │ Races: {_match.RacesCompleted}");
+
+                    // Victory flash — green glow
+                    _renderer?.FlashCarLight(5f, new Color(0.2f, 1f, 0.3f));
+                    _renderer?.FlashCarColor(new Color(0.6f, 3f, 1f));
+                    _renderer?.FlashWpLight(3f, Color.white);
+
                     if (autoRestart)
                         StartCoroutine(RestartAfterDelay());
                 };
 
-                _match.OnBoardChanged += () => _renderer?.MarkDirty();
+                _match.OnBoardChanged += () =>
+                {
+                    _renderer?.MarkDirty();
+                };
             }
         }
 
